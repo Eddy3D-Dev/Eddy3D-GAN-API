@@ -311,7 +311,9 @@ class PredictRequest(BaseModel):
 # ---------------------------------------------------------------------------
 @app.get("/")
 async def root():
-    """Basic service info for base URL checks."""
+    return {
+        "service": "Eddy3D GAN Wind Prediction API",
+        "status": "ok",
         "endpoints": ["/health", "/predict"],
     }
 

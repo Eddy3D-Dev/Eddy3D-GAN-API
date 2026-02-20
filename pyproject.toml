@@ -9,7 +9,7 @@ dependencies = [
     "uvicorn[standard]==0.30.0",
     "python-multipart==0.0.9",
     "onnxruntime==1.18.0",
-    "pillow==10.4.0",
+    "pillow==12.1.1",
     "numpy==1.26.4",
     "requests>=2.32.3",
     "slowapi==0.1.9",

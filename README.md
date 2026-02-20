@@ -9,7 +9,7 @@ app_port: 8000
 # Eddy3D GAN Wind Prediction API
 
 [![Hugging Face Spaces](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Spaces-blue)](https://huggingface.co/spaces/SustainableUrbanSystemsLab/Eddy3D-GAN)
-[![API Status](https://img.shields.io/website?url=https%3A%2F%2Fsustainableurbansystemslab-eddy3d-gan.hf.space%2Fhealth&up_message=online&up_color=success&down_message=offline&down_color=critical&label=API%20Status)](https://sustainableurbansystemslab-eddy3d-gan.hf.space/health)
+[![API Status](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fsustainableurbansystemslab-eddy3d-gan.hf.space%2Fhealth&query=%24.status&label=API%20Status&color=success)](https://sustainableurbansystemslab-eddy3d-gan.hf.space/health)
 
 FastAPI service that serves the GAN surrogate model for urban pedestrian-level wind flow prediction.
 

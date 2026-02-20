@@ -19,9 +19,10 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Check syntax
+      - name: Check syntax and imports
         run: |
           uv run --python 3.11 python -m py_compile *.py
+          uv run --python 3.11 python -c "import api"
 
       - name: Push to hub
         env:

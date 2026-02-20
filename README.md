@@ -10,6 +10,8 @@ app_port: 8000
 
 FastAPI service that serves the GAN surrogate model for urban pedestrian-level wind flow prediction.
 
+**Live API Endpoint:** `https://sustainableurbansystemslab-eddy3d-gan.hf.space`
+
 ## ONNX Model Hosting
 
 The ONNX model file (`GAN-21-05-2023-23-Generative.onnx`, ~208 MB) is **not included** in this repository. The container downloads it at startup from a URL you provide.

@@ -1,3 +1,11 @@
+---
+title: Eddy3D GAN API
+emoji: 🌬️
+colorFrom: blue
+colorTo: green
+sdk: docker
+app_port: 8000
+---
 # Eddy3D GAN Wind Prediction API
 
 FastAPI service that serves the GAN surrogate model for urban pedestrian-level wind flow prediction.

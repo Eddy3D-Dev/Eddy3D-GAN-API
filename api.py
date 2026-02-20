@@ -8,6 +8,7 @@ Accepts 512x512 input images or raw float arrays and returns predicted wind spee
 import os
 import io
 import base64
+import gzip
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -15,9 +16,9 @@ from typing import Optional
 
 import numpy as np
 from PIL import Image
-from fastapi import FastAPI, File, Request, UploadFile, HTTPException
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import onnxruntime as rt
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -267,36 +268,7 @@ app.add_middleware(
 )
 
 
-# ---------------------------------------------------------------------------
-# Helper: run inference
-# ---------------------------------------------------------------------------
-def _run_inference(image_bytes: bytes) -> tuple[np.ndarray, np.ndarray]:
-    """Preprocess image, run model, return (raw_output, denormalized_output).
-
-    Returns:
-        raw_output:  shape (3, 512, 512), values in [-1, 1]
-        denorm_output: shape (512, 512, 3), values in [0, 255], uint8
-    """
-    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    input_array = np.array(image.resize((512, 512)), dtype=np.float32)
-
-    # Normalize [0, 255] -> [-1, 1]
-    input_array = (input_array / 127.5) - 1.0
-    input_array = np.expand_dims(input_array, axis=0)          # (1, 512, 512, 3)
-    input_array = input_array.transpose((0, 3, 1, 2))          # (1, 3, 512, 512)
-
-    session = app.state.session
-    inputs = {app.state.input_name: input_array}
-    outputs = session.run(None, inputs)
-
-    raw = outputs[0][0]  # (3, 512, 512)
-
-    # Denormalise for image output
-    denorm = (raw.transpose((1, 2, 0)) + 1.0) * 127.5          # (512, 512, 3)
-    denorm = np.clip(denorm, 0, 255).astype(np.uint8)
-
-    return raw, denorm
-
+None
 
 def _run_inference_from_array(data: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Run model from a pre-normalised float32 array.
@@ -322,13 +294,16 @@ def _run_inference_from_array(data: np.ndarray) -> tuple[np.ndarray, np.ndarray]
     return raw, denorm
 
 
-class ArrayPredictRequest(BaseModel):
-    """Request body for /predict_array.
+None
 
-    The data field is a flat list of 786432 floats (3 * 512 * 512) in
-    channel-first order (R, G, B), with values already normalised to [-1, 1].
+class PredictRequest(BaseModel):
+    """Request body for /predict.
+
+    The data_b64 field is a base64-encoded, gzip-compressed flat array of
+    786432 float32 values (3 * 512 * 512) in channel-first order (R, G, B),
+    with values already normalised to [-1, 1].
     """
-    data: list[float]
+    data_b64: str
 
 
 # ---------------------------------------------------------------------------
@@ -337,10 +312,7 @@ class ArrayPredictRequest(BaseModel):
 @app.get("/")
 async def root():
     """Basic service info for base URL checks."""
-    return {
-        "service": "Eddy3D GAN Wind Prediction API",
-        "status": "ok",
-        "endpoints": ["/health", "/predict", "/predict_array", "/predict_image"],
+        "endpoints": ["/health", "/predict"],
     }
 
 
@@ -353,120 +325,58 @@ async def health():
     }
 
 
+None
+
 @app.post("/predict")
 @limiter.limit(_rate_limit_str)
-async def predict(request: Request, file: UploadFile = File(...)):
-    """Run GAN inference and return wind speeds + output image.
+async def predict(request: Request, body: PredictRequest):
+    """Run GAN inference from a gzip-compressed, base64-encoded float32 array.
 
     Returns JSON:
-        wind_speeds: list of floats (length 262144), values 0–15 m/s
+        wind_speeds_b64: base64-encoded, gzip-compressed float32 array (length 262144)
         image_base64: base64-encoded PNG of the output image
         width: 512
         height: 512
     """
-    # Validate content type
-    if file.content_type and not file.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="Uploaded file must be an image.")
-
-    input_data = await file.read()
-    if len(input_data) > MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=413, detail="File exceeds 10 MB limit.")
-
     t0 = time.perf_counter()
     try:
-        raw, denorm = _run_inference(input_data)
-    except Exception as e:
-        logger.exception("Inference failed")
-        raise HTTPException(status_code=500, detail=f"Inference error: {e}")
+        compressed_bytes = base64.b64decode(body.data_b64)
+        raw_bytes = gzip.decompress(compressed_bytes)
 
-    # Wind speeds from raw output
-    wind_speeds = _color_to_windspeed(raw)
+        arr = np.frombuffer(raw_bytes, dtype=np.float32)
+        expected = 3 * 512 * 512
+        if arr.size != expected:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Expected {expected} floats (3*512*512), got {arr.size}.",
+            )
 
-    # Encode output image as base64 PNG
-    output_image = Image.fromarray(denorm, "RGB")
-    buf = io.BytesIO()
-    output_image.save(buf, format="PNG")
-    image_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-
-    elapsed = time.perf_counter() - t0
-    logger.info("Inference completed in %.2f s", elapsed)
-
-    return JSONResponse({
-        "wind_speeds": wind_speeds,
-        "image_base64": image_b64,
-        "width": 512,
-        "height": 512,
-    })
-
-
-@app.post("/predict_image")
-@limiter.limit(_rate_limit_str)
-async def predict_image(request: Request, file: UploadFile = File(...)):
-    """Legacy endpoint: returns the output image as a PNG stream."""
-    if file.content_type and not file.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="Uploaded file must be an image.")
-
-    input_data = await file.read()
-    if len(input_data) > MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=413, detail="File exceeds 10 MB limit.")
-
-    try:
-        _, denorm = _run_inference(input_data)
-    except Exception as e:
-        logger.exception("Inference failed")
-        raise HTTPException(status_code=500, detail=f"Inference error: {e}")
-
-    output_image = Image.fromarray(denorm, "RGB")
-    buf = io.BytesIO()
-    output_image.save(buf, format="PNG")
-    buf.seek(0)
-
-    return StreamingResponse(buf, media_type="image/png")
-
-
-@app.post("/predict_array")
-@limiter.limit(_rate_limit_str)
-async def predict_array(request: Request, body: ArrayPredictRequest):
-    """Run GAN inference from a raw float array (no image encoding needed).
-
-    Accepts a flat list of 786432 floats (3 * 512 * 512) in channel-first
-    order, already normalised to [-1, 1].
-
-    Returns JSON:
-        wind_speeds: list of floats (length 262144), values 0-15 m/s
-        image_base64: base64-encoded PNG of the output image
-        width: 512
-        height: 512
-    """
-    expected = 3 * 512 * 512
-    if len(body.data) != expected:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Expected {expected} floats (3*512*512), got {len(body.data)}.",
-        )
-
-    t0 = time.perf_counter()
-    try:
-        arr = np.array(body.data, dtype=np.float32).reshape((3, 512, 512))
+        arr = arr.reshape((3, 512, 512))
         raw, denorm = _run_inference_from_array(arr)
+
+        wind_speeds_list = _color_to_windspeed(raw)
+
+        wind_speeds_arr = np.array(wind_speeds_list, dtype=np.float32)
+        wind_speeds_bytes = wind_speeds_arr.tobytes()
+        compressed_wind_speeds = gzip.compress(wind_speeds_bytes)
+        wind_speeds_b64 = base64.b64encode(compressed_wind_speeds).decode("ascii")
+
+        output_image = Image.fromarray(denorm, "RGB")
+        buf = io.BytesIO()
+        output_image.save(buf, format="PNG")
+        image_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+
     except HTTPException:
         raise
     except Exception as e:
         logger.exception("Inference failed")
         raise HTTPException(status_code=500, detail=f"Inference error: {e}")
 
-    wind_speeds = _color_to_windspeed(raw)
-
-    output_image = Image.fromarray(denorm, "RGB")
-    buf = io.BytesIO()
-    output_image.save(buf, format="PNG")
-    image_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-
     elapsed = time.perf_counter() - t0
-    logger.info("Array inference completed in %.2f s", elapsed)
+    logger.info("Binary inference completed in %.2f s", elapsed)
 
     return JSONResponse({
-        "wind_speeds": wind_speeds,
+        "wind_speeds_b64": wind_speeds_b64,
         "image_base64": image_b64,
         "width": 512,
         "height": 512,

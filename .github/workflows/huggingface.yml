@@ -21,8 +21,7 @@ jobs:
 
       - name: Check syntax
         run: |
-          uv python install
-          uv run python -m py_compile *.py
+          uv run --python 3.11 python -m py_compile *.py
 
       - name: Push to hub
         env:

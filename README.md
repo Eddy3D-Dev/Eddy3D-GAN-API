@@ -51,25 +51,6 @@ cp /path/to/GAN-21-05-2023-23-Generative.onnx model.onnx
 uv run uvicorn api:app --reload --port 8000
 ```
 
-## Deploying to Render
-
-1. Push this repo to GitHub
-2. Create a new **Web Service** on [Render](https://render.com)
-3. Connect the GitHub repo
-4. Render will auto-detect the `Dockerfile`
-5. Set the following environment variables in the Render dashboard:
-
-| Variable | Required | Example |
-|----------|----------|---------|
-| `MODEL_URL` | No | `https://huggingface.co/SustainableUrbanSystemsLab/UrbanWind-GAN/resolve/main/GAN-21-05-2023-23-Generative.onnx` |
-| `MODEL_SHA256` | No | `abc123...` (hex digest for integrity check) |
-| `RATE_LIMIT_REQUESTS` | No | `30` (default: 30 requests per window) |
-| `RATE_LIMIT_WINDOW` | No | `minute` (options: second, minute, hour, day) |
-| `ALLOWED_ORIGINS` | No | `*` (comma-separated CORS origins) |
-| `LOG_LEVEL` | No | `INFO` |
-
-Alternatively, use `render.yaml` for infrastructure-as-code deployment (Blueprint).
-
 ## API Endpoints
 
 | Method | Path | Description |

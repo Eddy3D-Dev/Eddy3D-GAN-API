@@ -174,6 +174,10 @@ TURBO_COLORMAP = np.array([
     [0.49321, 0.01963, 0.00955], [0.47960, 0.01583, 0.01055],
 ], dtype=np.float64)  # shape (256, 3)
 
+# Precomputed sum of squares for the colormap, shape (256,)
+# Used for fast squared Euclidean distance via dot product
+TURBO_COLORMAP_L2_SQ = np.sum(TURBO_COLORMAP**2, axis=1)
+
 
 def _color_to_windspeed(raw_output: np.ndarray) -> list[float]:
     """Map raw model output to wind speed values using Turbo colormap reverse-lookup.
@@ -198,9 +202,12 @@ def _color_to_windspeed(raw_output: np.ndarray) -> list[float]:
     pixels = np.stack([r.ravel(), g.ravel(), b.ravel()], axis=1)  # (H*W, 3)
 
     # Find closest colormap entry for each pixel via Euclidean distance
-    # Using broadcasting: pixels (H*W, 1, 3) - colormap (1, 256, 3) -> (H*W, 256, 3)
-    diff = pixels[:, np.newaxis, :] - TURBO_COLORMAP[np.newaxis, :, :]
-    dists = np.sum(diff * diff, axis=2)  # (H*W, 256)
+    # Optimization: ||P - C||^2 = ||P||^2 - 2(P dot C) + ||C||^2
+    # Since ||P||^2 is constant for all C, we only need to minimize: ||C||^2 - 2(P dot C)
+    # This avoids allocating a massive (H*W, 256, 3) intermediate array via broadcasting,
+    # reducing calculation time significantly.
+    PC = np.dot(pixels, TURBO_COLORMAP.T)  # (H*W, 256)
+    dists = TURBO_COLORMAP_L2_SQ - 2.0 * PC
     indices = np.argmin(dists, axis=1)  # (H*W,)
 
     # Map index to wind speed: index / n_colors * 15.0

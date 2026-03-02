@@ -194,24 +194,22 @@ def _color_to_windspeed(raw_output: np.ndarray) -> list[float]:
     n_colors = TURBO_COLORMAP.shape[0]
 
     # Convert from [-1, 1] to [0, 1]
-    r = (raw_output[0] + 1.0) / 2.0  # (H, W)
-    g = (raw_output[1] + 1.0) / 2.0
-    b = (raw_output[2] + 1.0) / 2.0
-
-    # Stack into (H*W, 3)
-    pixels = np.stack([r.ravel(), g.ravel(), b.ravel()], axis=1)  # (H*W, 3)
+    # Optimization: Instead of unrolling channels and stacking, reshape and transpose directly.
+    # Keeps float64 to ensure exactly identical output to original.
+    pixels = (raw_output.reshape(3, -1).T.astype(np.float64) + 1.0) * 0.5  # (H*W, 3)
 
     # Find closest colormap entry for each pixel via Euclidean distance
     # Optimization: ||P - C||^2 = ||P||^2 - 2(P dot C) + ||C||^2
-    # Since ||P||^2 is constant for all C, we only need to minimize: ||C||^2 - 2(P dot C)
-    # This avoids allocating a massive (H*W, 256, 3) intermediate array via broadcasting,
-    # reducing calculation time significantly.
+    # Since ||P||^2 is constant for all C, minimizing ||C||^2 - 2(P dot C)
+    # is mathematically equivalent to maximizing (P dot C) - 0.5 * ||C||^2.
+    # This allows using np.argmax, which is generally faster, and avoids allocating `dists`.
     PC = np.dot(pixels, TURBO_COLORMAP.T)  # (H*W, 256)
-    dists = TURBO_COLORMAP_L2_SQ - 2.0 * PC
-    indices = np.argmin(dists, axis=1)  # (H*W,)
+    PC -= 0.5 * TURBO_COLORMAP_L2_SQ
+    indices = np.argmax(PC, axis=1)  # (H*W,)
 
     # Map index to wind speed: index / n_colors * 15.0
-    wind_speeds = indices.astype(np.float64) / n_colors * 15.0
+    # Optimization: Vectorize division/multiplication for slight speedup
+    wind_speeds = indices.astype(np.float64) * (15.0 / n_colors)
 
     return wind_speeds.tolist()
 

@@ -179,7 +179,7 @@ TURBO_COLORMAP = np.array([
 TURBO_COLORMAP_L2_SQ = np.sum(TURBO_COLORMAP**2, axis=1)
 
 
-def _color_to_windspeed(raw_output: np.ndarray) -> list[float]:
+def _color_to_windspeed(raw_output: np.ndarray) -> np.ndarray:
     """Map raw model output to wind speed values using Turbo colormap reverse-lookup.
 
     Ported from Prediction.ColorToNumber in the decompiled CFDComponent.
@@ -188,7 +188,7 @@ def _color_to_windspeed(raw_output: np.ndarray) -> list[float]:
         raw_output: Model output array of shape (3, H, W) with values in [-1, 1].
 
     Returns:
-        Flat list of wind speed values (0-15 m/s), length H*W.
+        Flat numpy array of wind speed values (0-15 m/s), float32, length H*W.
     """
     _, h, w = raw_output.shape
     n_colors = TURBO_COLORMAP.shape[0]
@@ -208,10 +208,11 @@ def _color_to_windspeed(raw_output: np.ndarray) -> list[float]:
     indices = np.argmax(PC, axis=1)  # (H*W,)
 
     # Map index to wind speed: index / n_colors * 15.0
-    # Optimization: Vectorize division/multiplication for slight speedup
-    wind_speeds = indices.astype(np.float64) * (15.0 / n_colors)
+    # Optimization: Vectorize division/multiplication for slight speedup,
+    # directly cast to float32 to avoid python list conversion overhead
+    wind_speeds = (indices * (15.0 / n_colors)).astype(np.float32)
 
-    return wind_speeds.tolist()
+    return wind_speeds
 
 
 # ---------------------------------------------------------------------------
@@ -361,9 +362,8 @@ async def predict(request: Request, body: PredictRequest):
         arr = arr.reshape((3, 512, 512))
         raw, denorm = _run_inference_from_array(arr)
 
-        wind_speeds_list = _color_to_windspeed(raw)
+        wind_speeds_arr = _color_to_windspeed(raw)
 
-        wind_speeds_arr = np.array(wind_speeds_list, dtype=np.float32)
         wind_speeds_bytes = wind_speeds_arr.tobytes()
         compressed_wind_speeds = gzip.compress(wind_speeds_bytes)
         wind_speeds_b64 = base64.b64encode(compressed_wind_speeds).decode("ascii")

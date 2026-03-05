@@ -12,3 +12,6 @@
 ## 2025-03-04 - gzip.compress default level is incredibly slow
 **Learning:** Python's `gzip.compress` defaults to `compresslevel=9` (maximum compression). For reasonably sized binary arrays (e.g., 1MB float32 array converted to bytes), compression level 9 is incredibly slow (~500ms) but only yields a marginally smaller output compared to compression level 1 (~25ms). This results in massive API response latency with almost no bandwidth saving.
 **Action:** When compressing API payloads dynamically (especially numpy array bytes), always explicitly specify `compresslevel=1` to optimize for speed over marginal compression size differences.
+## 2025-03-05 - Array Type Conversion Overhead
+**Learning:** Expanding dimensions on an array (e.g. `np.expand_dims(data, axis=0).astype(np.float32)`) implicitly allocates a new array if `copy=False` isn't specified, even when the original array is already of type `np.float32`. This creates significant memory overhead and allocation time (~0.3ms vs ~0.003ms for a 3x512x512 array).
+**Action:** When casting types for inputs that may already be of the target type, always use `copy=False` or check the dtype explicitly before casting.

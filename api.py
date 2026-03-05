@@ -286,7 +286,9 @@ def _run_inference_from_array(data: np.ndarray) -> tuple[np.ndarray, np.ndarray]
         raw_output:  shape (3, 512, 512), values in [-1, 1]
         denorm_output: shape (512, 512, 3), values in [0, 255], uint8
     """
-    input_array = np.expand_dims(data, axis=0).astype(np.float32)  # (1, 3, 512, 512)
+    # Optimization: Use copy=False to avoid allocating and copying a new 3x512x512
+    # array when the input data is already np.float32.
+    input_array = np.expand_dims(data, axis=0).astype(np.float32, copy=False)  # (1, 3, 512, 512)
 
     session = app.state.session
     inputs = {app.state.input_name: input_array}

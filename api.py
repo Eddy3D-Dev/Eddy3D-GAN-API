@@ -175,13 +175,13 @@ TURBO_COLORMAP = np.array([
 ], dtype=np.float32)  # shape (256, 3)
 
 # ---------------------------------------------------------------------------
-# Pre-computed 3D lookup table: RGB uint8 -> colormap index
-# Built once at import time (~0.3s, 16 MB).  Replaces the per-request
-# (262 144, 3) x (3, 256) matrix multiply with a single fancy-index.
+# Pre-computed 1D lookup table: 24-bit RGB -> windspeed float32
+# Built once at import time (~0.3s, 64 MB). Replaces the per-request
+# 3D index lookup and float multiplication with a single 1D array view lookup.
 # ---------------------------------------------------------------------------
-def _build_colormap_lut() -> np.ndarray:
-    """Build a (256, 256, 256) uint8 LUT mapping every RGB uint8 triple to
-    its nearest Turbo-colormap index."""
+def _build_colormap_lut_1d() -> np.ndarray:
+    """Build a (16777216,) float32 LUT mapping every 24-bit RGB value to
+    its corresponding wind speed (0-15 m/s) based on the nearest Turbo-colormap index."""
     turbo_f32 = (TURBO_COLORMAP * 255.0).astype(np.float32)       # (256, 3)
     half_l2 = 0.5 * np.sum(turbo_f32 ** 2, axis=1)                # (256,)
 
@@ -196,10 +196,12 @@ def _build_colormap_lut() -> np.ndarray:
         scores -= half_l2
         lut[r] = np.argmax(scores, axis=1).reshape(256, 256).astype(np.uint8)
 
-    return lut
+    # Convert the 3D uint8 LUT into a flat 1D float32 array
+    # This completely eliminates index multiplication and float cast at inference time
+    return (lut.ravel() * (15.0 / 256)).astype(np.float32)
 
 
-COLORMAP_LUT = _build_colormap_lut()
+COLORMAP_LUT_1D_FLOAT = _build_colormap_lut_1d()
 
 
 def _color_to_windspeed(denorm: np.ndarray) -> np.ndarray:
@@ -211,8 +213,18 @@ def _color_to_windspeed(denorm: np.ndarray) -> np.ndarray:
     Returns:
         Flat float32 array of wind speed values (0–15 m/s), length H*W.
     """
-    indices = COLORMAP_LUT[denorm[:, :, 0], denorm[:, :, 1], denorm[:, :, 2]]
-    return (indices.ravel() * (15.0 / 256)).astype(np.float32)
+    # ⚡ Bolt Optimization: Zero-pad the RGB array to RGBA (4 bytes) and view it
+    # as a 32-bit integer array. This allows for lightning-fast 1D lookup
+    # and completely avoids multi-dimensional array slicing and index math.
+    padded = np.zeros((denorm.shape[0], denorm.shape[1], 4), dtype=np.uint8)
+    padded[:, :, 0] = denorm[:, :, 2] # B
+    padded[:, :, 1] = denorm[:, :, 1] # G
+    padded[:, :, 2] = denorm[:, :, 0] # R
+
+    # Use '<u4' to explicitly view as little-endian 32-bit unsigned integers
+    # ensuring cross-platform safety.
+    idx = padded.view('<u4').ravel()
+    return COLORMAP_LUT_1D_FLOAT[idx]
 
 
 # ---------------------------------------------------------------------------
@@ -285,23 +297,26 @@ def _run_inference_from_array(data: np.ndarray) -> np.ndarray:
     """Run model from a pre-normalised float32 array.
 
     Args:
-        data: shape (3, 512, 512), float32, values already in [-1, 1].
+        data: shape (1, 3, 512, 512), float32, values already in [-1, 1].
 
     Returns:
         denorm_output: shape (512, 512, 3), values in [0, 255], uint8
     """
-    input_array = np.expand_dims(data, axis=0).astype(np.float32, copy=False)
-
     session = app.state.session
-    inputs = {app.state.input_name: input_array}
+    inputs = {app.state.input_name: data}
     outputs = session.run(None, inputs)
 
     raw = outputs[0][0]  # (3, 512, 512)
 
-    denorm = (raw.transpose((1, 2, 0)) + 1.0) * 127.5
-    denorm = np.clip(denorm, 0, 255).astype(np.uint8)
+    # ⚡ Bolt Optimization: Use in-place array operations to avoid creating
+    # multiple large temporary arrays in memory during math operations.
+    # The final .transpose() returns a memory view, completely avoiding allocation.
+    denorm = np.empty_like(raw)
+    np.multiply(raw, 127.5, out=denorm)
+    np.add(denorm, 127.5, out=denorm)
+    np.clip(denorm, 0, 255, out=denorm)
 
-    return denorm
+    return denorm.astype(np.uint8).transpose((1, 2, 0))
 
 
 None
@@ -363,7 +378,10 @@ async def predict(request: Request, body: PredictRequest):
                 detail=f"Expected {expected} floats (3*512*512), got {arr.size}.",
             )
 
-        arr = arr.reshape((3, 512, 512))
+        # ⚡ Bolt Optimization: Directly reshape array into model input layout (1, 3, 512, 512)
+        # to avoid calling np.expand_dims and .astype(..., copy=False), which implicitly forces array
+        # copying even for matching dtypes. np.frombuffer output is already np.float32.
+        arr = arr.reshape((1, 3, 512, 512))
         denorm = _run_inference_from_array(arr)
 
         wind_speeds_arr = _color_to_windspeed(denorm)

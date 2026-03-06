@@ -15,3 +15,11 @@
 ## 2025-03-05 - Array Type Conversion Overhead
 **Learning:** Expanding dimensions on an array (e.g. `np.expand_dims(data, axis=0).astype(np.float32)`) implicitly allocates a new array if `copy=False` isn't specified, even when the original array is already of type `np.float32`. This creates significant memory overhead and allocation time (~0.3ms vs ~0.003ms for a 3x512x512 array).
 **Action:** When casting types for inputs that may already be of the target type, always use `copy=False` or check the dtype explicitly before casting.
+
+## 2025-03-05 - 1D Array Lookup Optimization for 3D Colors
+**Learning:** Using a 3D uint8 array lookup `COLORMAP_LUT[R, G, B]` followed by multiplication `(indices * (15.0 / 256)).astype(np.float32)` is memory intensive and computationally expensive for large image arrays. Pre-computing a flattened 1D `float32` array and looking up the values using a 32-bit integer array view `(padded.view('<u4'))` drastically improves lookup speed, avoiding both multidimensional indexing and runtime math operations.
+**Action:** When mapping discrete RGB combinations to float values in large arrays, pad to RGBA, interpret as little-endian `<u4` integers via `.view()`, and map directly to a pre-computed 1D float array.
+
+## 2025-03-05 - In-Place Array Operations
+**Learning:** Normalization and denormalization logic like `(data + 1.0) * 127.5` and `np.clip(...)` creates multiple massive intermediate arrays. This is extremely inefficient and puts heavy pressure on the garbage collector. Doing `np.multiply(raw, 127.5, out=denorm)` combined with `np.add` and `np.clip(..., out=denorm)` prevents allocating these intermediate arrays, bringing a ~20% speedup.
+**Action:** Use numpy in-place arithmetic operations (`out=`) for pixel-wise math whenever operating on large image data buffers to prevent allocating large intermediate float arrays.

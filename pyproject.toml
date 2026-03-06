@@ -5,7 +5,7 @@ description = "GAN surrogate model API for urban wind flow prediction"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "fastapi==0.115.0",
+    "fastapi[standard]==0.115.0",
     "uvicorn[standard]==0.30.0",
     "python-multipart==0.0.22",
     "onnxruntime==1.18.0",
@@ -13,6 +13,7 @@ dependencies = [
     "numpy==1.26.4",
     "requests>=2.32.3",
     "slowapi==0.1.9",
+    "httpx>=0.28.1",
 ]
 
 [build-system]

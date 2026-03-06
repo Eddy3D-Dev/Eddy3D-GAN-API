@@ -172,47 +172,47 @@ TURBO_COLORMAP = np.array([
     [0.54583, 0.03593, 0.00638], [0.53295, 0.03169, 0.00705],
     [0.51989, 0.02756, 0.00780], [0.50664, 0.02354, 0.00863],
     [0.49321, 0.01963, 0.00955], [0.47960, 0.01583, 0.01055],
-], dtype=np.float64)  # shape (256, 3)
+], dtype=np.float32)  # shape (256, 3)
 
-# Precomputed sum of squares for the colormap, shape (256,)
-# Used for fast squared Euclidean distance via dot product
-TURBO_COLORMAP_L2_SQ = np.sum(TURBO_COLORMAP**2, axis=1)
+# ---------------------------------------------------------------------------
+# Pre-computed 3D lookup table: RGB uint8 -> colormap index
+# Built once at import time (~0.3s, 16 MB).  Replaces the per-request
+# (262 144, 3) x (3, 256) matrix multiply with a single fancy-index.
+# ---------------------------------------------------------------------------
+def _build_colormap_lut() -> np.ndarray:
+    """Build a (256, 256, 256) uint8 LUT mapping every RGB uint8 triple to
+    its nearest Turbo-colormap index."""
+    turbo_f32 = (TURBO_COLORMAP * 255.0).astype(np.float32)       # (256, 3)
+    half_l2 = 0.5 * np.sum(turbo_f32 ** 2, axis=1)                # (256,)
+
+    lut = np.empty((256, 256, 256), dtype=np.uint8)
+    gb = np.mgrid[0:256, 0:256].astype(np.float32).reshape(2, -1).T  # (65536, 2)
+
+    for r in range(256):
+        pixels = np.empty((65536, 3), dtype=np.float32)
+        pixels[:, 0] = r
+        pixels[:, 1:] = gb
+        scores = pixels @ turbo_f32.T          # (65536, 256)
+        scores -= half_l2
+        lut[r] = np.argmax(scores, axis=1).reshape(256, 256).astype(np.uint8)
+
+    return lut
 
 
-def _color_to_windspeed(raw_output: np.ndarray) -> np.ndarray:
-    """Map raw model output to wind speed values using Turbo colormap reverse-lookup.
+COLORMAP_LUT = _build_colormap_lut()
 
-    Ported from Prediction.ColorToNumber in the decompiled CFDComponent.
+
+def _color_to_windspeed(denorm: np.ndarray) -> np.ndarray:
+    """Map denormalised uint8 output to wind speed via pre-computed LUT.
 
     Args:
-        raw_output: Model output array of shape (3, H, W) with values in [-1, 1].
+        denorm: (H, W, 3) uint8 array (the image produced by _run_inference_from_array).
 
     Returns:
-        Flat numpy array of wind speed values (0-15 m/s), float32, length H*W.
+        Flat float32 array of wind speed values (0–15 m/s), length H*W.
     """
-    _, h, w = raw_output.shape
-    n_colors = TURBO_COLORMAP.shape[0]
-
-    # Convert from [-1, 1] to [0, 1]
-    # Optimization: Instead of unrolling channels and stacking, reshape and transpose directly.
-    # Keeps float64 to ensure exactly identical output to original.
-    pixels = (raw_output.reshape(3, -1).T.astype(np.float64) + 1.0) * 0.5  # (H*W, 3)
-
-    # Find closest colormap entry for each pixel via Euclidean distance
-    # Optimization: ||P - C||^2 = ||P||^2 - 2(P dot C) + ||C||^2
-    # Since ||P||^2 is constant for all C, minimizing ||C||^2 - 2(P dot C)
-    # is mathematically equivalent to maximizing (P dot C) - 0.5 * ||C||^2.
-    # This allows using np.argmax, which is generally faster, and avoids allocating `dists`.
-    PC = np.dot(pixels, TURBO_COLORMAP.T)  # (H*W, 256)
-    PC -= 0.5 * TURBO_COLORMAP_L2_SQ
-    indices = np.argmax(PC, axis=1)  # (H*W,)
-
-    # Map index to wind speed: index / n_colors * 15.0
-    # Optimization: Vectorize division/multiplication for slight speedup,
-    # directly cast to float32 to avoid python list conversion overhead
-    wind_speeds = (indices * (15.0 / n_colors)).astype(np.float32)
-
-    return wind_speeds
+    indices = COLORMAP_LUT[denorm[:, :, 0], denorm[:, :, 1], denorm[:, :, 2]]
+    return (indices.ravel() * (15.0 / 256)).astype(np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -238,7 +238,12 @@ async def lifespan(app: FastAPI):
         logger.error("Model file not found at %s", MODEL_PATH)
         raise FileNotFoundError(f"Model file not found at {MODEL_PATH}")
 
-    session = rt.InferenceSession(MODEL_PATH)
+    opts = rt.SessionOptions()
+    opts.graph_optimization_level = rt.GraphOptimizationLevel.ORT_ENABLE_ALL
+    opts.intra_op_num_threads = 2
+    opts.inter_op_num_threads = 1
+    opts.execution_mode = rt.ExecutionMode.ORT_SEQUENTIAL
+    session = rt.InferenceSession(MODEL_PATH, opts)
     input_name = session.get_inputs()[0].name
     input_shape = session.get_inputs()[0].shape
     output_name = session.get_outputs()[0].name
@@ -276,19 +281,16 @@ app.add_middleware(
 
 None
 
-def _run_inference_from_array(data: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def _run_inference_from_array(data: np.ndarray) -> np.ndarray:
     """Run model from a pre-normalised float32 array.
 
     Args:
         data: shape (3, 512, 512), float32, values already in [-1, 1].
 
     Returns:
-        raw_output:  shape (3, 512, 512), values in [-1, 1]
         denorm_output: shape (512, 512, 3), values in [0, 255], uint8
     """
-    # Optimization: Use copy=False to avoid allocating and copying a new 3x512x512
-    # array when the input data is already np.float32.
-    input_array = np.expand_dims(data, axis=0).astype(np.float32, copy=False)  # (1, 3, 512, 512)
+    input_array = np.expand_dims(data, axis=0).astype(np.float32, copy=False)
 
     session = app.state.session
     inputs = {app.state.input_name: input_array}
@@ -299,7 +301,7 @@ def _run_inference_from_array(data: np.ndarray) -> tuple[np.ndarray, np.ndarray]
     denorm = (raw.transpose((1, 2, 0)) + 1.0) * 127.5
     denorm = np.clip(denorm, 0, 255).astype(np.uint8)
 
-    return raw, denorm
+    return denorm
 
 
 None
@@ -362,9 +364,9 @@ async def predict(request: Request, body: PredictRequest):
             )
 
         arr = arr.reshape((3, 512, 512))
-        raw, denorm = _run_inference_from_array(arr)
+        denorm = _run_inference_from_array(arr)
 
-        wind_speeds_arr = _color_to_windspeed(raw)
+        wind_speeds_arr = _color_to_windspeed(denorm)
 
         wind_speeds_bytes = wind_speeds_arr.tobytes()
 

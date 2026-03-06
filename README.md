@@ -3,87 +3,80 @@ title: Eddy3D GAN API
 emoji: 🌬️
 colorFrom: blue
 colorTo: green
-sdk: docker
-app_port: 8000
+sdk: gradio
+sdk_version: 5.12.0
+app_file: app.py
+pinned: false
 ---
 # Eddy3D GAN Wind Prediction API
 
 [![Hugging Face Spaces](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Spaces-blue)](https://huggingface.co/spaces/SustainableUrbanSystemsLab/Eddy3D-GAN)
-[![API Status](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fsustainableurbansystemslab-eddy3d-gan.hf.space%2Fhealth&query=%24.status&label=API%20Status&color=success)](https://sustainableurbansystemslab-eddy3d-gan.hf.space/health)
 
-FastAPI service that serves the GAN surrogate model for urban pedestrian-level wind flow prediction.
+Gradio app that serves the GAN surrogate model for urban pedestrian-level wind flow prediction, accelerated with **ZeroGPU** (free H200 GPU).
 
-**Live API Endpoint:** `https://sustainableurbansystemslab-eddy3d-gan.hf.space`
+**Live Endpoint:** `https://sustainableurbansystemslab-eddy3d-gan.hf.space`
+
+## How it works
+
+1. ONNX model is converted to PyTorch at startup via `onnx2torch`
+2. Each inference call gets a ZeroGPU-allocated H200 via `@spaces.GPU`
+3. Results are returned as JSON (wind speeds + PNG image, both base64-encoded)
 
 ## ONNX Model Hosting
 
-The ONNX model file (`GAN-21-05-2023-23-Generative.onnx`, ~208 MB) is **not included** in this repository. The container downloads it at startup from a URL you provide.
-
-The model is hosted on Hugging Face:
+The ONNX model file (`GAN-21-05-2023-23-Generative.onnx`, ~208 MB) is **not included** in this repository. It is downloaded at startup from:
 
 ```
 https://huggingface.co/SustainableUrbanSystemsLab/UrbanWind-GAN/resolve/main/GAN-21-05-2023-23-Generative.onnx
 ```
 
-`MODEL_URL` defaults to this URL if not provided, but you can override it via environment variable.
+## API Usage
 
-### Optional: SHA-256 Integrity Check
+### Python client
 
-Generate a checksum and set `MODEL_SHA256` to verify downloads:
+```python
+from gradio_client import Client
 
-```bash
-shasum -a 256 GAN-21-05-2023-23-Generative.onnx
+client = Client("SustainableUrbanSystemsLab/Eddy3D-GAN")
+result = client.predict(data_b64="...", api_name="/predict")
 ```
 
-## Local Development
+### cURL
 
 ```bash
-# Install uv (if not already installed)
-curl -LsSf https://astral.sh/uv/install.sh | sh
+# Step 1: Submit
+EVENT_ID=$(curl -s -X POST \
+  https://sustainableurbansystemslab-eddy3d-gan.hf.space/api/predict \
+  -H "Content-Type: application/json" \
+  -d '{"data": ["BASE64_DATA_HERE"]}' | jq -r '.event_id')
 
-# Install dependencies
-uv sync
-
-# Place your model file
-cp /path/to/GAN-21-05-2023-23-Generative.onnx model.onnx
-
-# Run the server
-uv run uvicorn api:app --reload --port 8000
+# Step 2: Fetch result
+curl -N https://sustainableurbansystemslab-eddy3d-gan.hf.space/api/predict/$EVENT_ID
 ```
 
-## API Endpoints
+### Input format
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/health` | Health check (not rate limited) |
-| POST | `/predict` | Image upload → wind speeds JSON + output image (base64) |
-| POST | `/predict_array` | Raw float array → wind speeds JSON + output image (base64) |
-| POST | `/predict_image` | Image upload → output PNG stream (legacy) |
+Base64-encoded, gzip-compressed flat array of 786,432 float32 values (3 x 512 x 512), channel-first order (R, G, B), normalised to [-1, 1].
 
-### `/predict_array` (primary endpoint)
-
-Accepts a JSON body with a flat float array of 786,432 values (3 x 512 x 512), channel-first order (R, G, B), normalised to [-1, 1].
+### Output format
 
 ```json
 {
-  "data": [0.1, -0.5, ...]
-}
-```
-
-Returns:
-
-```json
-{
-  "wind_speeds": [0.5, 1.2, ...],
-  "image_base64": "iVBORw0KGgo...",
+  "wind_speeds_b64": "...",
+  "image_base64": "...",
   "width": 512,
   "height": 512
 }
 ```
 
-## Docker
+## Local Development
 
 ```bash
-docker build -t eddy3d-gan-api .
-docker run -p 8000:8000 -e MODEL_URL="https://huggingface.co/SustainableUrbanSystemsLab/UrbanWind-GAN/resolve/main/GAN-21-05-2023-23-Generative.onnx" eddy3d-gan-api
+pip install -r requirements.txt
+
+# Place your model file
+cp /path/to/GAN-21-05-2023-23-Generative.onnx model.onnx
+
+# Run (CPU mode locally — @spaces.GPU is a no-op outside HF Spaces)
+python app.py
 ```

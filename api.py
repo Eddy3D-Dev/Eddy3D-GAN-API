@@ -308,15 +308,15 @@ def _run_inference_from_array(data: np.ndarray) -> np.ndarray:
 
     raw = outputs[0][0]  # (3, 512, 512)
 
-    # ⚡ Bolt Optimization: Use in-place array operations to avoid creating
-    # multiple large temporary arrays in memory during math operations.
-    # The final .transpose() returns a memory view, completely avoiding allocation.
-    denorm = np.empty_like(raw)
-    np.multiply(raw, 127.5, out=denorm)
-    np.add(denorm, 127.5, out=denorm)
-    np.clip(denorm, 0, 255, out=denorm)
+    # ⚡ Bolt Optimization: Use in-place array operations on the ONNX output
+    # directly to avoid allocating any new float32 arrays in memory during
+    # math operations. The ONNX runtime returns a standard mutable numpy array.
+    # The final .transpose() returns a memory view.
+    np.multiply(raw, 127.5, out=raw)
+    np.add(raw, 127.5, out=raw)
+    np.clip(raw, 0, 255, out=raw)
 
-    return denorm.astype(np.uint8).transpose((1, 2, 0))
+    return raw.astype(np.uint8).transpose((1, 2, 0))
 
 
 None

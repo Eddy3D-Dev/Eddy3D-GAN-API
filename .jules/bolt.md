@@ -23,3 +23,7 @@
 ## 2025-03-05 - In-Place Array Operations
 **Learning:** Normalization and denormalization logic like `(data + 1.0) * 127.5` and `np.clip(...)` creates multiple massive intermediate arrays. This is extremely inefficient and puts heavy pressure on the garbage collector. Doing `np.multiply(raw, 127.5, out=denorm)` combined with `np.add` and `np.clip(..., out=denorm)` prevents allocating these intermediate arrays, bringing a ~20% speedup.
 **Action:** Use numpy in-place arithmetic operations (`out=`) for pixel-wise math whenever operating on large image data buffers to prevent allocating large intermediate float arrays.
+
+## 2025-03-05 - Mutating ONNX Outputs In-Place
+**Learning:** ONNX runtime python bindings return standard mutable numpy arrays. Creating an `empty_like` array to store results of array arithmetic when mapping outputs back to image spaces is unnecessary and costs ~3MB per request plus allocation time.
+**Action:** Always perform in-place mathematical operations directly on the ONNX output array where possible, rather than pre-allocating an `empty_like` array, avoiding extra `float32` array memory allocations.

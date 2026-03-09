@@ -27,3 +27,7 @@
 ## 2025-03-05 - Mutating ONNX Outputs In-Place
 **Learning:** ONNX runtime python bindings return standard mutable numpy arrays. Creating an `empty_like` array to store results of array arithmetic when mapping outputs back to image spaces is unnecessary and costs ~3MB per request plus allocation time.
 **Action:** Always perform in-place mathematical operations directly on the ONNX output array where possible, rather than pre-allocating an `empty_like` array, avoiding extra `float32` array memory allocations.
+
+## 2025-03-05 - FastAPI Async CPU Blocking
+**Learning:** Using `async def` for FastAPI endpoints containing CPU-heavy operations (e.g. gzip compression, base64 encoding, numpy math, synchronous ONNX inference) runs the code directly on the single event loop. This blocks the server from processing concurrent requests, severely impacting API concurrency and causing `/health` checks to time out under load.
+**Action:** When a FastAPI endpoint consists primarily of CPU-bound, synchronous third-party library calls, define it using standard `def` instead of `async def`. FastAPI will automatically run `def` endpoints in an external threadpool, preserving the event loop's responsiveness.

@@ -31,3 +31,7 @@
 ## 2025-03-05 - FastAPI Async CPU Blocking
 **Learning:** Using `async def` for FastAPI endpoints containing CPU-heavy operations (e.g. gzip compression, base64 encoding, numpy math, synchronous ONNX inference) runs the code directly on the single event loop. This blocks the server from processing concurrent requests, severely impacting API concurrency and causing `/health` checks to time out under load.
 **Action:** When a FastAPI endpoint consists primarily of CPU-bound, synchronous third-party library calls, define it using standard `def` instead of `async def`. FastAPI will automatically run `def` endpoints in an external threadpool, preserving the event loop's responsiveness.
+
+## 2025-03-05 - Parallelizing NumPy Matmul Startup
+**Learning:** `np.matmul` natively releases the Python Global Interpreter Lock (GIL). When computing many independent matrix multiplications iteratively on a single thread (like generating a large 1D lookup table for colormaps), using `concurrent.futures.ThreadPoolExecutor` allows full utilization of multi-core CPUs.
+**Action:** When performing heavy independent matrix math in a loop that blocks server startup, divide the work into chunks and use a standard Python ThreadPoolExecutor to speed it up. Be mindful of temporary array memory consumption per thread and cap the number of threads (e.g. `min(8, os.cpu_count())`).

@@ -247,14 +247,15 @@ def _color_to_windspeed(denorm: np.ndarray) -> np.ndarray:
     # ⚡ Bolt Optimization: Zero-pad the RGB array to RGBA (4 bytes) and view it
     # as a 32-bit integer array. This allows for lightning-fast 1D lookup
     # and completely avoids multi-dimensional array slicing and index math.
-    padded = np.zeros((denorm.shape[0], denorm.shape[1], 4), dtype=np.uint8)
-    padded[:, :, 0] = denorm[:, :, 2] # B
-    padded[:, :, 1] = denorm[:, :, 1] # G
-    padded[:, :, 2] = denorm[:, :, 0] # R
+    # We allocate an empty 1D `<u4` array directly and fill the channels via an
+    # overlaid `uint8` view to avoid the cost of `np.zeros` and `view('<u4').ravel()`.
+    idx = np.empty(denorm.shape[0] * denorm.shape[1], dtype='<u4')
+    view = idx.view(np.uint8).reshape(denorm.shape[0], denorm.shape[1], 4)
+    view[:, :, 0] = denorm[:, :, 2] # B
+    view[:, :, 1] = denorm[:, :, 1] # G
+    view[:, :, 2] = denorm[:, :, 0] # R
+    view[:, :, 3] = 0 # A (Padding)
 
-    # Use '<u4' to explicitly view as little-endian 32-bit unsigned integers
-    # ensuring cross-platform safety.
-    idx = padded.view('<u4').ravel()
     return COLORMAP_LUT_1D_FLOAT[idx]
 
 
@@ -343,11 +344,11 @@ def _run_inference_from_array(data: np.ndarray) -> np.ndarray:
     # directly to avoid allocating any new float32 arrays in memory during
     # math operations. The ONNX runtime returns a standard mutable numpy array.
     # The final .transpose() returns a memory view.
+    np.add(raw, 1.0, out=raw)
     np.multiply(raw, 127.5, out=raw)
-    np.add(raw, 127.5, out=raw)
     np.clip(raw, 0, 255, out=raw)
 
-    return raw.astype(np.uint8).transpose((1, 2, 0))
+    return raw.transpose((1, 2, 0)).astype(np.uint8)
 
 
 None
@@ -417,7 +418,10 @@ def predict(request: Request, body: PredictRequest):
 
         wind_speeds_arr = _color_to_windspeed(denorm)
 
-        wind_speeds_bytes = wind_speeds_arr.tobytes()
+        # ⚡ Bolt Optimization: Use memoryview instead of .tobytes() to avoid allocating
+        # and copying a new bytes object for the full array before compression.
+        # gzip.compress accepts buffer protocol objects directly.
+        wind_speeds_bytes = memoryview(wind_speeds_arr)
 
         # Optimization: use compresslevel=1. The default is 9 which is extremely slow
         # for a 1MB payload (~500ms -> ~25ms) but only ~2% worse compression.

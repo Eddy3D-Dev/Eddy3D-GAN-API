@@ -9,9 +9,11 @@
 ## 2025-03-03 - NumPy to Python List Conversion Overhead
 **Learning:** Converting a large NumPy array (e.g., 262,144 elements) to a Python `list[float]` and back to a `np.float32` array using `.tolist()` and `np.array()` takes ~2.3 seconds per request. This overhead is incredibly high and unnecessary when the final format needed is bytes. Returning the NumPy array directly from processing functions completely bypasses this performance bottleneck, reducing conversion time to mere milliseconds.
 **Action:** Never convert large NumPy arrays to Python lists if the data ultimately stays in a numerical format or gets converted back to an array/bytes. Always maintain the data as a NumPy array and use array operations directly (e.g., `.astype()`, `.tobytes()`).
+
 ## 2025-03-04 - gzip.compress default level is incredibly slow
 **Learning:** Python's `gzip.compress` defaults to `compresslevel=9` (maximum compression). For reasonably sized binary arrays (e.g., 1MB float32 array converted to bytes), compression level 9 is incredibly slow (~500ms) but only yields a marginally smaller output compared to compression level 1 (~25ms). This results in massive API response latency with almost no bandwidth saving.
 **Action:** When compressing API payloads dynamically (especially numpy array bytes), always explicitly specify `compresslevel=1` to optimize for speed over marginal compression size differences.
+
 ## 2025-03-05 - Array Type Conversion Overhead
 **Learning:** Expanding dimensions on an array (e.g. `np.expand_dims(data, axis=0).astype(np.float32)`) implicitly allocates a new array if `copy=False` isn't specified, even when the original array is already of type `np.float32`. This creates significant memory overhead and allocation time (~0.3ms vs ~0.003ms for a 3x512x512 array).
 **Action:** When casting types for inputs that may already be of the target type, always use `copy=False` or check the dtype explicitly before casting.
@@ -35,3 +37,15 @@
 ## 2025-03-05 - Parallelizing NumPy Matmul Startup
 **Learning:** `np.matmul` natively releases the Python Global Interpreter Lock (GIL). When computing many independent matrix multiplications iteratively on a single thread (like generating a large 1D lookup table for colormaps), using `concurrent.futures.ThreadPoolExecutor` allows full utilization of multi-core CPUs.
 **Action:** When performing heavy independent matrix math in a loop that blocks server startup, divide the work into chunks and use a standard Python ThreadPoolExecutor to speed it up. Be mindful of temporary array memory consumption per thread and cap the number of threads (e.g. `min(8, os.cpu_count())`).
+
+## 2025-03-05 - Avoid .tobytes() zero-copy bytes memory compression
+**Learning:** Using `.tobytes()` on a numpy array creates a full copy of the array's data as a byte string. For a 1MB float32 array, this takes up extra memory and time. `gzip.compress` supports buffer protocol objects, so we can pass `memoryview(arr)` directly to compress the array data without copying it into a python `bytes` object first.
+**Action:** When feeding numpy arrays to functions accepting buffers (like `gzip.compress`), always wrap them in a `memoryview` instead of calling `.tobytes()` to eliminate memory copies and improve latency.
+
+## 2025-03-05 - NumPy Transpose and Astype Order
+**Learning:** Calling `.astype(np.uint8).transpose(...)` creates an intermediate uint8 array in the original layout, then returns a non-contiguous transposed view. By calling `.transpose(...).astype(np.uint8)`, numpy iterates over the transposed memory view and constructs a brand new, memory-contiguous output array directly.
+**Action:** When a contiguous output array is needed (like for PIL conversion or memory operations), transpose the array *before* casting its type to force contiguous memory layout generation.
+
+## 2025-03-05 - Avoid np.zeros for Padded Structs
+**Learning:** Allocating an array with `np.zeros` and immediately overwriting most of it is inefficient. Using `np.empty` and then explicitly zeroing only the required padding parts (like the alpha channel in an RGBA padding structure) skips a full memory-zeroing pass.
+**Action:** Use `np.empty` and explicitly initialize required values instead of `np.zeros` when building a temporary data structure that gets fully overwritten, especially in hot loops or large arrays.

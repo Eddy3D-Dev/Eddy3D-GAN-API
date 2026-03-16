@@ -49,3 +49,7 @@
 ## 2025-03-05 - Avoid np.zeros for Padded Structs
 **Learning:** Allocating an array with `np.zeros` and immediately overwriting most of it is inefficient. Using `np.empty` and then explicitly zeroing only the required padding parts (like the alpha channel in an RGBA padding structure) skips a full memory-zeroing pass.
 **Action:** Use `np.empty` and explicitly initialize required values instead of `np.zeros` when building a temporary data structure that gets fully overwritten, especially in hot loops or large arrays.
+
+## 2025-03-05 - Factoring out partial Matrix Multiplications from Loops
+**Learning:** Computing the dot product `P dot C` inside a loop where a subset of `P` dimensions remains constant across iterations leads to massive redundant computation. Evaluating `G * C_g + B * C_b` inside a thread pool for every `R` value in a 256x256x256 lookup table generation wastes gigabytes of matrix multiplication bandwidth and drastically increases startup time.
+**Action:** Always identify components of a dot product or matrix multiplication that are constant with respect to an outer loop. Factor them out and pre-calculate them once before the loop. Inside the inner loop, use a simple `np.add` to combine the pre-calculated term with the loop-dependent term (`R * C_r`), replacing expensive $O(N \times 3 \times C)$ operations with extremely fast $O(N \times C)$ array additions.

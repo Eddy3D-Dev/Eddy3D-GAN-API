@@ -53,3 +53,7 @@
 ## 2025-03-05 - Factoring out partial Matrix Multiplications from Loops
 **Learning:** Computing the dot product `P dot C` inside a loop where a subset of `P` dimensions remains constant across iterations leads to massive redundant computation. Evaluating `G * C_g + B * C_b` inside a thread pool for every `R` value in a 256x256x256 lookup table generation wastes gigabytes of matrix multiplication bandwidth and drastically increases startup time.
 **Action:** Always identify components of a dot product or matrix multiplication that are constant with respect to an outer loop. Factor them out and pre-calculate them once before the loop. Inside the inner loop, use a simple `np.add` to combine the pre-calculated term with the loop-dependent term (`R * C_r`), replacing expensive $O(N \times 3 \times C)$ operations with extremely fast $O(N \times C)$ array additions.
+
+## 2025-03-05 - Concurrent Endpoint Processing
+**Learning:** In endpoints executing heavy synchronous I/O or GIL-releasing work (like `gzip.compress` or PIL `Image.save`), sequential execution leaves resources idle and unnecessarily increases latency. Even though FastAPI runs standard `def` endpoints in an external thread pool, the endpoint itself is still single-threaded, and executing two 45ms tasks sequentially takes 90ms.
+**Action:** When an endpoint performs multiple slow, independent, GIL-releasing operations (e.g. gzip compression and image encoding), wrap them in a local `concurrent.futures.ThreadPoolExecutor` to process them in parallel, halving payload preparation time.

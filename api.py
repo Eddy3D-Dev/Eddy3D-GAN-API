@@ -355,8 +355,10 @@ def _run_inference_from_array(data: np.ndarray) -> np.ndarray:
     # directly to avoid allocating any new float32 arrays in memory during
     # math operations. The ONNX runtime returns a standard mutable numpy array.
     # The final .transpose() returns a memory view.
-    np.add(raw, 1.0, out=raw)
+    # We apply (raw * 127.5) + 127.5 instead of (raw + 1.0) * 127.5.
+    # This evaluates as Fused Multiply-Add logic reducing float addition overhead.
     np.multiply(raw, 127.5, out=raw)
+    np.add(raw, 127.5, out=raw)
     np.clip(raw, 0, 255, out=raw)
 
     return raw.transpose((1, 2, 0)).astype(np.uint8)

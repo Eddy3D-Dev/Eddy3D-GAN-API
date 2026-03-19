@@ -57,3 +57,7 @@
 ## 2025-03-05 - Concurrent Endpoint Processing
 **Learning:** In endpoints executing heavy synchronous I/O or GIL-releasing work (like `gzip.compress` or PIL `Image.save`), sequential execution leaves resources idle and unnecessarily increases latency. Even though FastAPI runs standard `def` endpoints in an external thread pool, the endpoint itself is still single-threaded, and executing two 45ms tasks sequentially takes 90ms.
 **Action:** When an endpoint performs multiple slow, independent, GIL-releasing operations (e.g. gzip compression and image encoding), wrap them in a local `concurrent.futures.ThreadPoolExecutor` to process them in parallel, halving payload preparation time.
+
+## 2025-03-05 - Fused Multiply-Add equivalent in NumPy
+**Learning:** When performing linear transformations on numpy arrays in-place such as normalizations, the expression `(x + 1.0) * 127.5` results in a float addition over the array elements followed by a multiplication. By distributing the multiplication to `(x * 127.5) + 127.5`, the execution can evaluate fractionally faster in NumPy by reducing potential floating point addition overhead.
+**Action:** Convert sequential scalar normalizations from `(x + C1) * C2` to `(x * C2) + (C1 * C2)` when mutating large arrays in-place to gain a small performance boost in latency-critical loops.

@@ -1,7 +1,3 @@
-## 2024-05-24 - NumPy Array Broadcasting for Pairwise Distances
-**Learning:** Using NumPy broadcasting to compute pairwise Euclidean distances between a large array of points (e.g., 262,144 pixels) and a smaller set (e.g., 256 colormap entries) like `diff = pixels[:, np.newaxis, :] - TURBO_COLORMAP[np.newaxis, :, :]` is incredibly memory-inefficient and slow. It creates a massive intermediate array in memory (`H*W*256*3` floats). For finding the minimum distance, evaluating `||C||^2 - 2(P dot C)` using `np.dot` instead of `||P - C||^2` completely avoids allocating this large array and is significantly faster (~40x speedup).
-**Action:** When computing pairwise Euclidean distances for searching/nearest-neighbor lookup, use matrix multiplication `P dot C^T` combined with precomputed norms `||C||^2`, skipping `||P||^2` if only the minimum/argmin over `C` is needed. This avoids memory bottlenecks from array broadcasting.
-
 ## 2025-03-02 - Array Reshaping and Distance Argmax Optimization
 **Learning:** Unrolling channels from a NumPy array and using `np.stack` creates unnecessary intermediate arrays and is slower than leveraging `reshape` and `transpose` directly. Additionally, when searching for the nearest Euclidean neighbor, mathematically transforming the minimization of `||C||^2 - 2(P dot C)` to the maximization of `(P dot C) - 0.5 * ||C||^2` allows the use of `np.argmax`, which can be slightly faster and avoids allocating intermediate distance arrays.
 **Action:** Always prefer direct array `reshape` and `transpose` over manual unraveling (`ravel()`) and `stack` for channel manipulation. When calculating argmin distance metrics, evaluate whether multiplying by -0.5 and using `np.argmax` allows avoiding matrix allocations.
@@ -61,3 +57,15 @@
 ## 2025-03-05 - Fused Multiply-Add equivalent in NumPy
 **Learning:** When performing linear transformations on numpy arrays in-place such as normalizations, the expression `(x + 1.0) * 127.5` results in a float addition over the array elements followed by a multiplication. By distributing the multiplication to `(x * 127.5) + 127.5`, the execution can evaluate fractionally faster in NumPy by reducing potential floating point addition overhead.
 **Action:** Convert sequential scalar normalizations from `(x + C1) * C2` to `(x * C2) + (C1 * C2)` when mutating large arrays in-place to gain a small performance boost in latency-critical loops.
+
+## 2025-03-21 - Memoryview and Base64 Encoding
+**Learning:** Passing the memoryview directly via `buf.getbuffer()` to `base64.b64encode` rather than copying via `buf.getvalue()` bypasses massive intermediate python `bytes` allocations without affecting encoding compatibility, bringing small but highly efficient speed-ups.
+**Action:** Always use `.getbuffer()` instead of `.getvalue()` when wrapping large buffer streams (e.g. `io.BytesIO()`) with standard library functions that accept memoryview buffers, like base64 encoders.
+
+## 2025-03-21 - Array Reshape vs Slicing
+**Learning:** Reordering multi-dimensional arrays via flat dimension shapes (e.g. `reshape(-1, 3)`) is slightly faster than performing generic full-dimensional slices like `view[:, :, 0] = flat[:, :, 2]`. Additionally, when building structures with padding bytes, avoiding `np.empty` explicitly to assign padding and using `np.zeros` combined with the faster flat assignments reduces the memory bottleneck by skipping the loop's assignment of `0` to padding arrays.
+**Action:** Always prefer flattened `reshape(-1, X)` slice indexing over multidimensional `[:, :, X]` indexing when shifting continuous pixel data. If assigning data that contains large block sequences of zeros, consider `np.zeros` initialization to avoid Python array-slicing zeroing overhead if it avoids redundant channel assignment logic.
+
+## 2025-03-21 - np.take vs direct NumPy Array indexing
+**Learning:** Extracting multiple values from a 1D NumPy Array (LUT) using `np.take(LUT, indices)` is highly optimized internally and runs roughly 20% faster than standard Python indexing `LUT[indices]` when fetching from large lookup tables for color processing.
+**Action:** When extracting data from a multi-megabyte 1D lookup table using arrays of integers, use `np.take(Array, indexes)` rather than direct dictionary-like indexing to reduce computation overhead.

@@ -450,7 +450,9 @@ def predict(request: Request, body: PredictRequest):
             # Optimization: use compress_level=1 for PNG saving.
             # This saves ~5-10ms per image generation with virtually identical size.
             output_image.save(buf, format="PNG", compress_level=1)
-            return base64.b64encode(buf.getvalue()).decode("ascii")
+            # ⚡ Bolt Optimization: Use .getbuffer() instead of .getvalue() to return a memoryview
+            # directly and avoid allocating a massive intermediate python bytes object.
+            return base64.b64encode(buf.getbuffer()).decode("ascii")
 
         future_wind = _thread_pool.submit(_compress_wind_speeds)
         future_img = _thread_pool.submit(_encode_image)

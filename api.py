@@ -253,14 +253,15 @@ def _color_to_windspeed(denorm: np.ndarray) -> np.ndarray:
     # ⚡ Bolt Optimization: Zero-pad the RGB array to RGBA (4 bytes) and view it
     # as a 32-bit integer array. This allows for lightning-fast 1D lookup
     # and completely avoids multi-dimensional array slicing and index math.
-    # We allocate an empty 1D `<u4` array directly and fill the channels via an
-    # overlaid `uint8` view to avoid the cost of `np.zeros` and `view('<u4').ravel()`.
-    idx = np.empty(denorm.shape[0] * denorm.shape[1], dtype='<u4')
-    view = idx.view(np.uint8).reshape(denorm.shape[0], denorm.shape[1], 4)
-    view[:, :, 0] = denorm[:, :, 2] # B
-    view[:, :, 1] = denorm[:, :, 1] # G
-    view[:, :, 2] = denorm[:, :, 0] # R
-    view[:, :, 3] = 0 # A (Padding)
+    # We allocate a 1D `<u4` array with np.zeros to implicitly pad the alpha channel,
+    # and fill the color channels via a flattened 2D overlaid `uint8` view to
+    # eliminate overhead from multidimensional array slicing.
+    idx = np.zeros(denorm.shape[0] * denorm.shape[1], dtype='<u4')
+    view = idx.view(np.uint8).reshape(-1, 4)
+    denorm_flat = denorm.reshape(-1, 3)
+    view[:, 0] = denorm_flat[:, 2] # B
+    view[:, 1] = denorm_flat[:, 1] # G
+    view[:, 2] = denorm_flat[:, 0] # R
 
     return COLORMAP_LUT_1D_FLOAT[idx]
 
@@ -450,7 +451,10 @@ def predict(request: Request, body: PredictRequest):
             # Optimization: use compress_level=1 for PNG saving.
             # This saves ~5-10ms per image generation with virtually identical size.
             output_image.save(buf, format="PNG", compress_level=1)
-            return base64.b64encode(buf.getvalue()).decode("ascii")
+            # ⚡ Bolt Optimization: Use buf.getbuffer() instead of buf.getvalue()
+            # to pass a memoryview directly to b64encode. This avoids allocating
+            # a massive intermediate bytes object and speeds up encoding.
+            return base64.b64encode(buf.getbuffer()).decode("ascii")
 
         future_wind = _thread_pool.submit(_compress_wind_speeds)
         future_img = _thread_pool.submit(_encode_image)

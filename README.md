@@ -56,30 +56,31 @@ uv run uvicorn api:app --reload --port 8000
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/health` | Health check (not rate limited) |
-| POST | `/predict` | Image upload → wind speeds JSON + output image (base64) |
-| POST | `/predict_array` | Raw float array → wind speeds JSON + output image (base64) |
-| POST | `/predict_image` | Image upload → output PNG stream (legacy) |
+| POST | `/predict.bin` | GZip/base64 float array -> GZip-compressed float32 wind field |
 
-### `/predict_array` (primary endpoint)
+### `/predict.bin`
 
-Accepts a JSON body with a flat float array of 786,432 values (3 x 512 x 512), channel-first order (R, G, B), normalised to [-1, 1].
+Accepts a JSON body with `data_b64`, a base64-encoded GZip payload containing a flat float32 array of 786,432 values (3 x 512 x 512), channel-first order (R, G, B), normalised to [-1, 1].
 
 ```json
 {
-  "data": [0.1, -0.5, ...]
+  "data_b64": "H4sIA..."
 }
 ```
 
-Returns:
+Returns only the GZip-compressed float32 wind field as `application/gzip`. Response headers include `X-Eddy3D-Width`, `X-Eddy3D-Height`, and `X-Eddy3D-Value-Type`.
 
-```json
-{
-  "wind_speeds": [0.5, 1.2, ...],
-  "image_base64": "iVBORw0KGgo...",
-  "width": 512,
-  "height": 512
-}
+## Performance Settings
+
+ONNX Runtime thread settings are configurable:
+
+```bash
+ONNX_INTRA_OP_THREADS=8
+ONNX_INTER_OP_THREADS=1
+ONNX_EXECUTION_MODE=SEQUENTIAL
 ```
+
+By default, `ONNX_INTRA_OP_THREADS` uses up to 8 available CPU cores.
 
 ## Docker
 

@@ -6,20 +6,17 @@ Accepts 512x512 input images or raw float arrays and returns predicted wind spee
 """
 
 import os
-import io
 import base64
 import gzip
 import logging
 import time
 from contextlib import asynccontextmanager
 from typing import Optional
-import concurrent.futures
 
 import numpy as np
-from PIL import Image
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import Response
 from pydantic import BaseModel
 import onnxruntime as rt
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -36,6 +33,12 @@ ALLOWED_ORIGINS = os.environ.get("ALLOWED_ORIGINS", "*").split(",")
 RATE_LIMIT_REQUESTS = os.environ.get("RATE_LIMIT_REQUESTS", "30")
 RATE_LIMIT_WINDOW = os.environ.get("RATE_LIMIT_WINDOW", "minute")
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
+DEFAULT_ONNX_INTRA_OP_THREADS = min(8, os.cpu_count() or 2)
+ONNX_INTRA_OP_THREADS = int(
+    os.environ.get("ONNX_INTRA_OP_THREADS", str(DEFAULT_ONNX_INTRA_OP_THREADS))
+)
+ONNX_INTER_OP_THREADS = int(os.environ.get("ONNX_INTER_OP_THREADS", "1"))
+ONNX_EXECUTION_MODE = os.environ.get("ONNX_EXECUTION_MODE", "SEQUENTIAL").upper()
 
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -281,10 +284,6 @@ limiter = Limiter(
 # Application lifecycle
 # ---------------------------------------------------------------------------
 
-# ⚡ Bolt Optimization: A global thread pool to avoid per-request thread churn
-# when parallelizing slow I/O bound tasks like gzip compression and PNG saving.
-_thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=8)
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Load ONNX model at startup, release at shutdown."""
@@ -295,16 +294,28 @@ async def lifespan(app: FastAPI):
 
     opts = rt.SessionOptions()
     opts.graph_optimization_level = rt.GraphOptimizationLevel.ORT_ENABLE_ALL
-    opts.intra_op_num_threads = 2
-    opts.inter_op_num_threads = 1
-    opts.execution_mode = rt.ExecutionMode.ORT_SEQUENTIAL
+    opts.intra_op_num_threads = ONNX_INTRA_OP_THREADS
+    opts.inter_op_num_threads = ONNX_INTER_OP_THREADS
+    opts.execution_mode = (
+        rt.ExecutionMode.ORT_PARALLEL
+        if ONNX_EXECUTION_MODE == "PARALLEL"
+        else rt.ExecutionMode.ORT_SEQUENTIAL
+    )
     session = rt.InferenceSession(MODEL_PATH, opts)
     input_name = session.get_inputs()[0].name
     input_shape = session.get_inputs()[0].shape
     output_name = session.get_outputs()[0].name
     output_shape = session.get_outputs()[0].shape
-    logger.info("Model loaded. Input: %s %s  Output: %s %s",
-                input_name, input_shape, output_name, output_shape)
+    logger.info(
+        "Model loaded. Input: %s %s  Output: %s %s  ONNX threads: intra=%d inter=%d mode=%s",
+        input_name,
+        input_shape,
+        output_name,
+        output_shape,
+        ONNX_INTRA_OP_THREADS,
+        ONNX_INTER_OP_THREADS,
+        ONNX_EXECUTION_MODE,
+    )
 
     app.state.session = session
     app.state.input_name = input_name
@@ -367,13 +378,67 @@ def _run_inference_from_array(data: np.ndarray) -> np.ndarray:
 None
 
 class PredictRequest(BaseModel):
-    """Request body for /predict.
+    """Request body for /predict.bin.
 
     The data_b64 field is a base64-encoded, gzip-compressed flat array of
     786432 float32 values (3 * 512 * 512) in channel-first order (R, G, B),
     with values already normalised to [-1, 1].
     """
     data_b64: str
+
+
+def _compress_wind_speeds(wind_speeds_arr: np.ndarray) -> bytes:
+    # gzip.compress writes len(data) into the GZip trailer. For a NumPy
+    # memoryview len(...) is the first dimension, not the byte count, so
+    # materialize contiguous float32 bytes before compression.
+    wind_speeds_bytes = np.ascontiguousarray(
+        wind_speeds_arr, dtype="<f4"
+    ).tobytes()
+    # Optimization: use compresslevel=1. The default is 9 which is extremely slow
+    # for a 1MB payload (~500ms -> ~25ms) but only ~2% worse compression.
+    return gzip.compress(wind_speeds_bytes, compresslevel=1)
+
+
+def _run_prediction(data_b64: str) -> bytes:
+    """Run the model and return gzip-compressed float32 wind speeds."""
+    t0 = time.perf_counter()
+
+    compressed_bytes = base64.b64decode(data_b64)
+    raw_bytes = gzip.decompress(compressed_bytes)
+    arr = np.frombuffer(raw_bytes, dtype=np.float32)
+    expected = 3 * 512 * 512
+    if arr.size != expected:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Expected {expected} floats (3*512*512), got {arr.size}.",
+        )
+
+    # Directly reshape array into model input layout (1, 3, 512, 512).
+    arr = arr.reshape((1, 3, 512, 512))
+    t_decode = time.perf_counter()
+
+    denorm = _run_inference_from_array(arr)
+    t_inference = time.perf_counter()
+
+    wind_speeds_arr = _color_to_windspeed(denorm)
+    t_wind_map = time.perf_counter()
+
+    t_wind_gzip_start = time.perf_counter()
+    wind_gzip = _compress_wind_speeds(wind_speeds_arr)
+    t_wind_gzip = time.perf_counter()
+
+    total_s = time.perf_counter() - t0
+    logger.info(
+        "Binary inference completed in %.3f s "
+        "(decode=%.1f ms, inference=%.1f ms, color_to_wind=%.1f ms, wind_gzip=%.1f ms)",
+        total_s,
+        (t_decode - t0) * 1000,
+        (t_inference - t_decode) * 1000,
+        (t_wind_map - t_inference) * 1000,
+        (t_wind_gzip - t_wind_gzip_start) * 1000,
+    )
+
+    return wind_gzip
 
 
 # ---------------------------------------------------------------------------
@@ -384,7 +449,7 @@ async def root():
     return {
         "service": "Eddy3D GAN Wind Prediction API",
         "status": "ok",
-        "endpoints": ["/health", "/predict"],
+        "endpoints": ["/health", "/predict.bin"],
     }
 
 
@@ -399,80 +464,25 @@ async def health():
 
 None
 
-@app.post("/predict")
+@app.post("/predict.bin")
 @limiter.limit(_rate_limit_str)
-def predict(request: Request, body: PredictRequest):
-    """Run GAN inference from a gzip-compressed, base64-encoded float32 array.
-
-    Returns JSON:
-        wind_speeds_b64: base64-encoded, gzip-compressed float32 array (length 262144)
-        image_base64: base64-encoded PNG of the output image
-        width: 512
-        height: 512
-    """
-    t0 = time.perf_counter()
+def predict_bin(request: Request, body: PredictRequest):
+    """Run GAN inference and return only the gzip-compressed float32 wind field."""
     try:
-        compressed_bytes = base64.b64decode(body.data_b64)
-        raw_bytes = gzip.decompress(compressed_bytes)
-
-        arr = np.frombuffer(raw_bytes, dtype=np.float32)
-        expected = 3 * 512 * 512
-        if arr.size != expected:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Expected {expected} floats (3*512*512), got {arr.size}.",
-            )
-
-        # ⚡ Bolt Optimization: Directly reshape array into model input layout (1, 3, 512, 512)
-        # to avoid calling np.expand_dims and .astype(..., copy=False), which implicitly forces array
-        # copying even for matching dtypes. np.frombuffer output is already np.float32.
-        arr = arr.reshape((1, 3, 512, 512))
-        denorm = _run_inference_from_array(arr)
-
-        wind_speeds_arr = _color_to_windspeed(denorm)
-
-        # ⚡ Bolt Optimization: Use a ThreadPoolExecutor to run the two slow I/O bound
-        # tasks (gzip compression and PNG saving) concurrently. Both `gzip.compress` (zlib)
-        # and PIL's `Image.save` release the Python GIL internally, meaning they can
-        # execute truly in parallel. This halves the payload preparation time (~90ms -> ~45ms).
-        def _compress_wind_speeds():
-            # gzip.compress writes len(data) into the GZip trailer. For a NumPy
-            # memoryview len(...) is the first dimension, not the byte count, so
-            # materialize contiguous float32 bytes before compression.
-            wind_speeds_bytes = np.ascontiguousarray(
-                wind_speeds_arr, dtype="<f4"
-            ).tobytes()
-            # Optimization: use compresslevel=1. The default is 9 which is extremely slow
-            # for a 1MB payload (~500ms -> ~25ms) but only ~2% worse compression.
-            compressed = gzip.compress(wind_speeds_bytes, compresslevel=1)
-            return base64.b64encode(compressed).decode("ascii")
-
-        def _encode_image():
-            output_image = Image.fromarray(denorm, "RGB")
-            buf = io.BytesIO()
-            # Optimization: use compress_level=1 for PNG saving.
-            # This saves ~5-10ms per image generation with virtually identical size.
-            output_image.save(buf, format="PNG", compress_level=1)
-            return base64.b64encode(buf.getvalue()).decode("ascii")
-
-        future_wind = _thread_pool.submit(_compress_wind_speeds)
-        future_img = _thread_pool.submit(_encode_image)
-
-        wind_speeds_b64 = future_wind.result()
-        image_b64 = future_img.result()
-
+        wind_gzip = _run_prediction(body.data_b64)
     except HTTPException:
         raise
     except Exception as e:
         logger.exception("Inference failed")
         raise HTTPException(status_code=500, detail=f"Inference error: {e}")
 
-    elapsed = time.perf_counter() - t0
-    logger.info("Binary inference completed in %.2f s", elapsed)
-
-    return JSONResponse({
-        "wind_speeds_b64": wind_speeds_b64,
-        "image_base64": image_b64,
-        "width": 512,
-        "height": 512,
-    })
+    return Response(
+        content=wind_gzip,
+        media_type="application/gzip",
+        headers={
+            "X-Eddy3D-Width": "512",
+            "X-Eddy3D-Height": "512",
+            "X-Eddy3D-Value-Type": "float32",
+            "X-Eddy3D-Encoding": "gzip",
+        },
+    )

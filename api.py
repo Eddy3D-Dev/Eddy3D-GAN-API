@@ -436,9 +436,12 @@ def predict(request: Request, body: PredictRequest):
         # and PIL's `Image.save` release the Python GIL internally, meaning they can
         # execute truly in parallel. This halves the payload preparation time (~90ms -> ~45ms).
         def _compress_wind_speeds():
-            # Use memoryview instead of .tobytes() to avoid allocating
-            # and copying a new bytes object for the full array before compression.
-            wind_speeds_bytes = memoryview(wind_speeds_arr)
+            # gzip.compress writes len(data) into the GZip trailer. For a NumPy
+            # memoryview len(...) is the first dimension, not the byte count, so
+            # materialize contiguous float32 bytes before compression.
+            wind_speeds_bytes = np.ascontiguousarray(
+                wind_speeds_arr, dtype="<f4"
+            ).tobytes()
             # Optimization: use compresslevel=1. The default is 9 which is extremely slow
             # for a 1MB payload (~500ms -> ~25ms) but only ~2% worse compression.
             compressed = gzip.compress(wind_speeds_bytes, compresslevel=1)

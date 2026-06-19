@@ -8,7 +8,7 @@ import requests
 
 DEFAULT_MODEL_URL = (
     "https://huggingface.co/SustainableUrbanSystemsLab/Yel-1.0/resolve/main/"
-    "Yel.onnx
+    "Yel.onnx"
 )
 
 # Allow empty env var values to fall back to the default hosted model.
